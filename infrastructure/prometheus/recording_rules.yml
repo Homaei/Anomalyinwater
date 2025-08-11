@@ -1,0 +1,136 @@
+# Prometheus Recording Rules for WWTP Anomaly Detection System
+
+groups:
+  - name: wwtp_aggregation_rules
+    interval: 30s
+    rules:
+      # HTTP request rates by service
+      - record: wwtp:http_requests_per_second
+        expr: sum(rate(http_requests_total[5m])) by (job, method, status_code)
+
+      - record: wwtp:http_request_duration_p99
+        expr: histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le))
+
+      - record: wwtp:http_request_duration_p95
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le))
+
+      - record: wwtp:http_request_duration_p50
+        expr: histogram_quantile(0.50, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le))
+
+      # Error rates
+      - record: wwtp:http_error_rate
+        expr: sum(rate(http_requests_total{status_code=~"4..|5.."}[5m])) by (job) / sum(rate(http_requests_total[5m])) by (job)
+
+      # ML Worker metrics
+      - record: wwtp:ml_processing_rate
+        expr: sum(rate(ml_images_processed_total[5m])) by (status)
+
+      - record: wwtp:ml_anomaly_rate
+        expr: rate(ml_anomalies_detected_total[5m]) / rate(ml_images_processed_total{status="success"}[5m])
+
+      - record: wwtp:ml_processing_duration_p95
+        expr: histogram_quantile(0.95, sum(rate(ml_processing_duration_seconds_bucket[5m])) by (le))
+
+      - record: wwtp:ml_error_rate
+        expr: sum(rate(ml_images_processed_total{status="error"}[5m])) / sum(rate(ml_images_processed_total[5m]))
+
+      # Queue metrics
+      - record: wwtp:queue_processing_rate
+        expr: sum(rate(ml_queue_messages_processed_total[5m])) by (status)
+
+      - record: wwtp:queue_size_avg
+        expr: avg(rabbitmq_queue_messages) by (queue)
+
+      # Database metrics
+      - record: wwtp:db_connection_utilization
+        expr: sum(pg_stat_database_numbackends) by (datname) / sum(pg_settings_max_connections) by (instance)
+
+      - record: wwtp:db_query_duration_p95
+        expr: histogram_quantile(0.95, sum(rate(database_operation_duration_seconds_bucket[5m])) by (operation, table, le))
+
+      # System metrics
+      - record: wwtp:cpu_utilization
+        expr: 100 - (avg by (instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+
+      - record: wwtp:memory_utilization
+        expr: 1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+
+      - record: wwtp:disk_utilization
+        expr: 1 - (node_filesystem_free_bytes / node_filesystem_size_bytes)
+
+      # GPU metrics (if available)
+      - record: wwtp:gpu_memory_utilization
+        expr: ml_gpu_memory_allocated_bytes / (ml_gpu_memory_allocated_bytes + ml_gpu_memory_free_bytes)
+
+  - name: wwtp_business_rules
+    interval: 60s
+    rules:
+      # Business KPIs
+      - record: wwtp:daily_images_processed
+        expr: increase(ml_images_processed_total{status="success"}[24h])
+
+      - record: wwtp:daily_anomalies_detected  
+        expr: increase(ml_anomalies_detected_total[24h])
+
+      - record: wwtp:daily_anomaly_rate
+        expr: increase(ml_anomalies_detected_total[24h]) / increase(ml_images_processed_total{status="success"}[24h])
+
+      - record: wwtp:hourly_processing_rate
+        expr: rate(ml_images_processed_total{status="success"}[1h])
+
+      - record: wwtp:review_completion_rate
+        expr: rate(reviews_processed_total{status=~"approved|rejected"}[1h])
+
+      - record: wwtp:pending_review_backlog
+        expr: pending_reviews_total
+
+      # Accuracy metrics
+      - record: wwtp:detection_accuracy_1h
+        expr: anomaly_detection_accuracy
+
+      - record: wwtp:false_positive_rate_1h
+        expr: false_positive_rate
+
+      - record: wwtp:false_negative_rate_1h
+        expr: false_negative_rate
+
+      # Performance SLIs
+      - record: wwtp:api_availability_5m
+        expr: sum(rate(http_requests_total[5m])) by (job) > 0
+
+      - record: wwtp:api_latency_sli
+        expr: histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le)) < 1.0
+
+      - record: wwtp:ml_processing_sli
+        expr: histogram_quantile(0.95, sum(rate(ml_processing_duration_seconds_bucket[5m])) by (le)) < 10.0
+
+  - name: wwtp_alerting_rules
+    interval: 30s
+    rules:
+      # Service health indicators
+      - record: wwtp:service_health_score
+        expr: |
+          (
+            (wwtp:api_availability_5m * 0.4) +
+            (wwtp:api_latency_sli * 0.3) +
+            ((1 - wwtp:http_error_rate) * 0.3)
+          )
+
+      # System health score
+      - record: wwtp:system_health_score
+        expr: |
+          (
+            ((wwtp:cpu_utilization < 80) * 0.25) +
+            ((wwtp:memory_utilization < 0.85) * 0.25) +
+            ((wwtp:disk_utilization < 0.9) * 0.25) +
+            (up * 0.25)
+          )
+
+      # Overall application health
+      - record: wwtp:app_health_score
+        expr: |
+          (
+            (wwtp:service_health_score * 0.4) +
+            (wwtp:system_health_score * 0.3) +
+            ((ml_model_status > 0) * 0.3)
+          )

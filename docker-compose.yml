@@ -1,0 +1,224 @@
+version: '3.8'
+
+services:
+  # Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: wwtp_postgres
+    environment:
+      POSTGRES_DB: wwtp_anomaly
+      POSTGRES_USER: ${POSTGRES_USER:-wwtp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infrastructure/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - wwtp_network
+
+  # Message Queue
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: wwtp_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-admin}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-admin123}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./infrastructure/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - wwtp_network
+
+  # Authentication Service
+  auth-service:
+    build:
+      context: ./backend/auth-service
+      dockerfile: Dockerfile
+    container_name: wwtp_auth
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-wwtp_user}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/wwtp_anomaly
+      - JWT_SECRET=${JWT_SECRET:-your_jwt_secret_key}
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8001:8000"
+    networks:
+      - wwtp_network
+
+  # Upload Service
+  upload-service:
+    build:
+      context: ./backend/upload-service
+      dockerfile: Dockerfile
+    container_name: wwtp_upload
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-wwtp_user}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/wwtp_anomaly
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin123}@rabbitmq:5672/
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
+    depends_on:
+      - postgres
+      - rabbitmq
+      - minio
+    ports:
+      - "8002:8000"
+    volumes:
+      - upload_storage:/app/uploads
+    networks:
+      - wwtp_network
+
+  # Review Service
+  review-service:
+    build:
+      context: ./backend/review-service
+      dockerfile: Dockerfile
+    container_name: wwtp_review
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-wwtp_user}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/wwtp_anomaly
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin123}@rabbitmq:5672/
+    depends_on:
+      - postgres
+      - rabbitmq
+    ports:
+      - "8003:8000"
+    networks:
+      - wwtp_network
+
+  # ML Worker
+  ml-worker:
+    build:
+      context: ./backend/ml-worker
+      dockerfile: Dockerfile
+    container_name: wwtp_ml_worker
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-wwtp_user}:${POSTGRES_PASSWORD:-secure_password}@postgres:5432/wwtp_anomaly
+      - RABBITMQ_URL=amqp://${RABBITMQ_USER:-admin}:${RABBITMQ_PASSWORD:-admin123}@rabbitmq:5672/
+      - MODEL_PATH=/app/models
+    depends_on:
+      - postgres
+      - rabbitmq
+    volumes:
+      - ml_models:/app/models
+      - upload_storage:/app/uploads:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - wwtp_network
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: wwtp_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - wwtp_network
+
+  # MinIO for object storage
+  minio:
+    image: minio/minio:latest
+    container_name: wwtp_minio
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --console-address ":9001"
+    networks:
+      - wwtp_network
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: wwtp_frontend
+    environment:
+      - REACT_APP_API_URL=http://nginx:80/api
+    depends_on:
+      - nginx
+    ports:
+      - "3000:3000"
+    networks:
+      - wwtp_network
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: wwtp_nginx
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - auth-service
+      - upload-service
+      - review-service
+    networks:
+      - wwtp_network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: wwtp_prometheus
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - wwtp_network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: wwtp_grafana
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin123}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./infrastructure/grafana/datasources:/etc/grafana/provisioning/datasources
+    ports:
+      - "3001:3000"
+    networks:
+      - wwtp_network
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  redis_data:
+  minio_data:
+  upload_storage:
+  ml_models:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  wwtp_network:
+    driver: bridge

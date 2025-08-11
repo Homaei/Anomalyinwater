@@ -1,0 +1,175 @@
+# Prometheus Alert Rules for WWTP Anomaly Detection System
+
+groups:
+  - name: wwtp_system_alerts
+    rules:
+      # Service availability alerts
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "Service {{ $labels.job }} on instance {{ $labels.instance }} has been down for more than 1 minute."
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value }} for {{ $labels.job }} on {{ $labels.instance }}"
+
+      # Database alerts
+      - alert: DatabaseConnectionsHigh
+        expr: pg_stat_database_numbackends / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database connection usage high"
+          description: "Database connections are at {{ $value | humanizePercentage }} of maximum"
+
+      - alert: DatabaseSlowQueries
+        expr: rate(pg_stat_database_blk_read_time[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database slow queries detected"
+          description: "Database query time is high: {{ $value }}ms average"
+
+      # Queue alerts  
+      - alert: RabbitMQQueueSizeHigh
+        expr: rabbitmq_queue_messages > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RabbitMQ queue size high"
+          description: "Queue {{ $labels.queue }} has {{ $value }} messages"
+
+      - alert: RabbitMQConsumerDown
+        expr: rabbitmq_queue_consumers == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "RabbitMQ queue has no consumers"
+          description: "Queue {{ $labels.queue }} has no active consumers"
+
+      # ML Worker alerts
+      - alert: MLWorkerProcessingErrors
+        expr: rate(ml_queue_processing_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ML Worker processing errors"
+          description: "ML Worker error rate: {{ $value }} errors/sec"
+
+      - alert: MLModelNotLoaded
+        expr: ml_model_status == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ML Model not loaded"
+          description: "ML model is not loaded on {{ $labels.instance }}"
+
+      - alert: GPUMemoryHigh
+        expr: ml_gpu_memory_allocated_bytes / (ml_gpu_memory_allocated_bytes + ml_gpu_memory_free_bytes) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU memory usage high"
+          description: "GPU memory usage is {{ $value | humanizePercentage }}"
+
+      # System resource alerts
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High memory usage"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU usage"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}"
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_free_bytes / node_filesystem_size_bytes) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Low disk space"
+          description: "Disk space is {{ $value | humanizePercentage }} free on {{ $labels.instance }}"
+
+      # Application-specific alerts
+      - alert: ReviewQueueBacklog
+        expr: pending_reviews_total > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Review queue backlog"
+          description: "There are {{ $value }} pending reviews"
+
+      - alert: AnomalyDetectionAccuracyLow
+        expr: anomaly_detection_accuracy < 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low anomaly detection accuracy"
+          description: "Anomaly detection accuracy is {{ $value | humanizePercentage }}"
+
+      - alert: ImageProcessingLatencyHigh
+        expr: histogram_quantile(0.95, rate(ml_processing_duration_seconds_bucket[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High image processing latency"
+          description: "95th percentile processing time is {{ $value }}s"
+
+  - name: wwtp_business_alerts
+    rules:
+      # Business logic alerts
+      - alert: HighAnomalyRate
+        expr: rate(ml_anomalies_detected_total[1h]) / rate(ml_images_processed_total[1h]) > 0.3
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High anomaly detection rate"
+          description: "Anomaly rate is {{ $value | humanizePercentage }} over the last hour"
+
+      - alert: NoImagesProcessed
+        expr: increase(ml_images_processed_total[30m]) == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No images processed"
+          description: "No images have been processed in the last 30 minutes"
+
+      - alert: ReviewTimeHigh
+        expr: avg_review_time_seconds > 600
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Average review time high"
+          description: "Average review time is {{ $value }}s ({{ $value | humanizeDuration }})"
