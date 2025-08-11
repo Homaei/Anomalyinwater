@@ -6,7 +6,7 @@ A production-ready microservices architecture for detecting anomalies in water t
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   React Frontend │    │  Nginx Proxy    │    │  Auth Service   │
+│  React Frontend │    │  Nginx Proxy    │    │  Auth Service   │
 │                 │    │                 │    │                 │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
                                 ▲
